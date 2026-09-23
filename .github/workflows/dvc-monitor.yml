@@ -68,6 +68,10 @@ jobs:
 
           View the confirmed reservations:
           https://dvc-rental.com/deals"
+                    curl -H "Title: 🚨 New DVC Reservation!" \
+            -H "Priority: high" \
+            -d "New reservation detected: $NEW_IDS — https://dvc-rental.com/deals" \
+            https://ntfy.sh/dvc-alert-7x9k4m2q8v6p3n5r
           else
             echo "No new reservations."
           fi

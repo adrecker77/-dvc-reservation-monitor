@@ -1,0 +1,86 @@
+name: DVC Reservation Monitor
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get repository
+        uses: actions/checkout@v4
+
+      - name: Check DVC reservations
+        shell: bash
+        run: |
+          set -e
+
+          URL="https://dvc-rental.com/deals"
+          STATE_FILE="known-dvc-ids.txt"
+
+          curl -L --fail --silent --show-error \
+            -A "Mozilla/5.0" \
+            "$URL" > page.html
+
+          grep -oE 'DVC[0-9]+' page.html | sort -u > current.txt || true
+
+          COUNT=$(wc -l < current.txt | tr -d ' ')
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: No DVC reservation IDs were found."
+            exit 1
+          fi
+
+          echo "Found $COUNT current reservations."
+
+          # First run: save existing reservations without alerting
+          if [ ! -f "$STATE_FILE" ]; then
+            cp current.txt "$STATE_FILE"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "$STATE_FILE"
+            git commit -m "Create initial DVC reservation baseline"
+            git push
+            echo "Baseline created. No alerts sent."
+            exit 0
+          fi
+
+          # Find IDs that did not exist on the previous check
+          comm -13 "$STATE_FILE" current.txt > new.txt || true
+
+          if [ -s new.txt ]; then
+            NEW_IDS=$(paste -sd ', ' new.txt)
+
+            echo "New reservations detected: $NEW_IDS"
+
+            gh issue create \
+              --title "🚨 New DVC reservation: $NEW_IDS" \
+              --body "New confirmed reservation(s) detected on DVC-Rental:
+
+          $NEW_IDS
+
+          View the confirmed reservations:
+          https://dvc-rental.com/deals"
+          else
+            echo "No new reservations."
+          fi
+
+          # Save the latest reservation list
+          cp current.txt "$STATE_FILE"
+
+          if ! git diff --quiet "$STATE_FILE"; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "$STATE_FILE"
+            git commit -m "Update DVC reservation baseline"
+            git push
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}

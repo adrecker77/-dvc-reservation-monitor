@@ -2,5 +2,12 @@
   "announcement": true,
   "booking": false,
   "announcement_hashes": [],
-  "booking_hashes": []
+  "booking_hashes": [],
+  "grinch_v3_initialized": true,
+  "grinch_v3_announcements": [
+    "16dd059e123bd125e260bb5b553188548fbf6faf3aa1e8ce947b010c8b43c756",
+    "ea90acd7f4120b607d87fedd5453419540a3bdc053787c6f8d431c5eba485bfa"
+  ],
+  "grinch_v3_booking_links": [],
+  "grinch_v3_last_check": "2026-10-26T19:31:05.841035+00:00"
 }

@@ -1,0 +1,208 @@
+name: Grinch Breakfast Monitor
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: grinch-breakfast-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check Grinch Breakfast
+        env:
+          NTFY_TOPIC: ${{ secrets.GRINCH_NTFY_TOPIC }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import json
+          import urllib.request
+          from pathlib import Path
+          from html import unescape
+
+          URLS = [
+              "https://www.universalorlando.com/web/en/us/things-to-do/events/holidays-at-universal",
+              "https://www.universalorlando.com/web/en/us/plan-your-visit/dining-experiences/reservations",
+              "https://blog.discoveruniversal.com/events/guide-to-the-holidays-at-universal-orlando-resort/"
+          ]
+
+          STATE_FILE = Path("grinch-breakfast-state.json")
+          TOPIC = os.environ["NTFY_TOPIC"]
+
+          def notify(title, message, priority="high"):
+              data = message.encode("utf-8")
+
+              req = urllib.request.Request(
+                  f"https://ntfy.sh/{TOPIC}",
+                  data=data,
+                  headers={
+                      "Title": title,
+                      "Priority": priority,
+                      "Tags": "christmas_tree"
+                  },
+                  method="POST"
+              )
+
+              urllib.request.urlopen(req, timeout=20)
+
+          def fetch(url):
+              req = urllib.request.Request(
+                  url,
+                  headers={
+                      "User-Agent": "Mozilla/5.0"
+                  }
+              )
+
+              with urllib.request.urlopen(
+                  req, timeout=30
+              ) as response:
+                  return response.read().decode(
+                      "utf-8", errors="ignore"
+                  )
+
+          def clean(text):
+              text = re.sub(
+                  r"<script.*?</script>",
+                  " ",
+                  text,
+                  flags=re.I | re.S
+              )
+
+              text = re.sub(
+                  r"<style.*?</style>",
+                  " ",
+                  text,
+                  flags=re.I | re.S
+              )
+
+              text = re.sub(r"<[^>]+>", " ", text)
+
+              return unescape(text)
+
+          def check_page(url):
+              html = fetch(url)
+              text = clean(html)
+
+              text = re.sub(r"\s+", " ", text)
+
+              mentions_breakfast = bool(
+                  re.search(
+                      r"grinch.{0,100}breakfast|"
+                      r"breakfast.{0,100}grinch",
+                      text,
+                      re.I
+                  )
+              )
+
+              mentions_2026 = "2026" in text
+
+              booking_language = bool(
+                  re.search(
+                      r"book now|reserve now|"
+                      r"purchase tickets|"
+                      r"buy tickets|"
+                      r"make a reservation",
+                      text,
+                      re.I
+                  )
+              )
+
+              return {
+                  "url": url,
+                  "breakfast": mentions_breakfast,
+                  "year": mentions_2026,
+                  "booking": booking_language
+              }
+
+          results = []
+
+          for url in URLS:
+              try:
+                  result = check_page(url)
+                  results.append(result)
+                  print("Checked:", url)
+                  print(result)
+
+              except Exception as error:
+                  print("Error checking:", url)
+                  print(error)
+
+          if not results:
+              raise RuntimeError(
+                  "All Universal pages failed."
+              )
+
+          announcement = any(
+              r["breakfast"] and r["year"]
+              for r in results
+          )
+
+          booking_signal = any(
+              r["breakfast"]
+              and r["year"]
+              and r["booking"]
+              for r in results
+          )
+
+          if STATE_FILE.exists():
+              state = json.loads(
+                  STATE_FILE.read_text()
+              )
+          else:
+              state = {
+                  "announcement": False,
+                  "booking": False
+              }
+
+          if announcement and not state["announcement"]:
+              notify(
+                  "GRINCH BREAKFAST ANNOUNCEMENT!",
+                  "Universal has published information "
+                  "that may relate to Grinch Breakfast "
+                  "2026. Check the official website."
+              )
+
+              state["announcement"] = True
+
+          if booking_signal and not state["booking"]:
+              notify(
+                  "GRINCH BREAKFAST BOOKING SIGNAL!",
+                  "Universal's website contains "
+                  "Grinch Breakfast and booking "
+                  "language. Verify December 2026 "
+                  "availability before purchasing.",
+                  "urgent"
+              )
+
+              state["booking"] = True
+
+          STATE_FILE.write_text(
+              json.dumps(state, indent=2)
+          )
+
+          print("Monitoring complete.")
+          PY
+
+      - name: Save monitoring state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add grinch-breakfast-state.json
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Update Grinch monitoring state"
+            git push
+          fi

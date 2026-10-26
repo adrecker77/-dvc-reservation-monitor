@@ -1,4 +1,6 @@
 {
   "announcement": true,
-  "booking": false
+  "booking": false,
+  "announcement_hashes": [],
+  "booking_hashes": []
 }

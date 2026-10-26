@@ -20,7 +20,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check Grinch Breakfast
+      - name: Check Universal Grinch Breakfast
         env:
           NTFY_TOPIC: ${{ secrets.GRINCH_NTFY_TOPIC }}
         run: |
@@ -30,10 +30,14 @@ jobs:
           import json
           import hashlib
           import urllib.request
-          from pathlib import Path
+          import urllib.parse
           from html import unescape
+          from html.parser import HTMLParser
+          from pathlib import Path
+          from datetime import datetime, timezone
 
-          URLS = [
+          SOURCES = [
+              "https://www.universalorlando.com/web/en/us/holidays/tickets",
               "https://www.universalorlando.com/web/en/us/things-to-do/events/holidays-at-universal",
               "https://www.universalorlando.com/web/en/us/plan-your-visit/dining-experiences/reservations",
               "https://blog.discoveruniversal.com/events/guide-to-the-holidays-at-universal-orlando-resort/"
@@ -45,9 +49,94 @@ jobs:
           if not TOPIC:
               raise RuntimeError("GRINCH_NTFY_TOPIC is missing.")
 
+          class PageParser(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.text = []
+                  self.links = []
+                  self.skip = 0
+                  self.current_href = None
+                  self.link_text = []
+
+              def handle_starttag(self, tag, attrs):
+                  attrs = dict(attrs)
+
+                  if tag in ("script", "style"):
+                      self.skip += 1
+
+                  if tag == "a":
+                      self.current_href = attrs.get("href")
+                      self.link_text = []
+
+              def handle_endtag(self, tag):
+                  if tag in ("script", "style"):
+                      self.skip = max(0, self.skip - 1)
+
+                  if tag == "a" and self.current_href:
+                      self.links.append((
+                          " ".join(self.link_text),
+                          self.current_href
+                      ))
+                      self.current_href = None
+                      self.link_text = []
+
+              def handle_data(self, data):
+                  if not self.skip:
+                      self.text.append(data)
+
+                      if self.current_href:
+                          self.link_text.append(data)
+
+          def fetch(url):
+              request = urllib.request.Request(
+                  url,
+                  headers={
+                      "User-Agent": "Mozilla/5.0",
+                      "Accept": "text/html"
+                  }
+              )
+
+              with urllib.request.urlopen(
+                  request, timeout=30
+              ) as response:
+                  return response.read().decode(
+                      "utf-8", errors="replace"
+                  )
+
+          def normalize(text):
+              return re.sub(
+                  r"\s+", " ", unescape(text)
+              ).strip()
+
+          def breakfast_match(text):
+              return bool(re.search(
+                  r"grinch.{0,90}breakfast|"
+                  r"breakfast.{0,90}grinch",
+                  text,
+                  re.I
+              ))
+
+          def booking_match(text):
+              return bool(re.search(
+                  r"book now|reserve now|"
+                  r"purchase tickets|buy tickets|"
+                  r"book breakfast|"
+                  r"reserve breakfast|"
+                  r"select date|"
+                  r"get tickets",
+                  text,
+                  re.I
+              ))
+
+          def fingerprint(value):
+              return hashlib.sha256(
+                  value.encode("utf-8")
+              ).hexdigest()
+
           def notify(title, message, priority="high"):
-              req = urllib.request.Request(
-                  f"https://ntfy.sh/{TOPIC}",
+              request = urllib.request.Request(
+                  "https://ntfy.sh/" +
+                  urllib.parse.quote(TOPIC, safe=""),
                   data=message.encode("utf-8"),
                   headers={
                       "Title": title,
@@ -56,189 +145,171 @@ jobs:
                   },
                   method="POST"
               )
-              with urllib.request.urlopen(req, timeout=20):
-                  pass
 
-          def fetch(url):
-              req = urllib.request.Request(
-                  url,
-                  headers={
-                      "User-Agent": "Mozilla/5.0"
-                  }
-              )
-              with urllib.request.urlopen(req, timeout=30) as response:
-                  return response.read().decode(
-                      "utf-8", errors="ignore"
-                  )
+              with urllib.request.urlopen(
+                  request, timeout=20
+              ) as response:
+                  print("Notification:", response.status)
 
-          def clean(html):
-              html = re.sub(
-                  r"<script\b[^>]*>.*?</script>",
-                  " ",
-                  html,
-                  flags=re.I | re.S
-              )
-              html = re.sub(
-                  r"<style\b[^>]*>.*?</style>",
-                  " ",
-                  html,
-                  flags=re.I | re.S
-              )
-              html = re.sub(r"<[^>]+>", " ", html)
-              return re.sub(r"\s+", " ", unescape(html))
+          def inspect_page(url):
+              parser = PageParser()
+              parser.feed(fetch(url))
 
-          def check_page(url):
-              text = clean(fetch(url))
-
-              breakfast_pattern = (
-                  r"grinch.{0,60}breakfast|"
-                  r"breakfast.{0,60}grinch"
-              )
-
-              contexts = []
+              text = normalize(" ".join(parser.text))
+              announcements = []
+              booking_links = []
 
               for match in re.finditer(
-                  breakfast_pattern, text, re.I
+                  r"grinch.{0,90}breakfast|"
+                  r"breakfast.{0,90}grinch",
+                  text,
+                  re.I
               ):
-                  start = max(0, match.start() - 180)
-                  end = min(len(text), match.end() + 220)
-                  contexts.append(text[start:end])
+                  start = max(0, match.start() - 100)
+                  end = min(len(text), match.end() + 180)
+                  context = text[start:end]
 
-              announcement_contexts = []
-              booking_contexts = []
+                  if re.search(
+                      r"2026|2027|coming|"
+                      r"returning|reservations|"
+                      r"tickets|available|"
+                      r"holiday",
+                      context,
+                      re.I
+                  ):
+                      announcements.append(
+                          normalize(context)
+                      )
 
-              for context in contexts:
-                  if not re.search(r"\b2026\b", context):
+              for label, href in parser.links:
+                  label = normalize(label)
+                  full_url = urllib.parse.urljoin(url, href)
+
+                  if not full_url.startswith(
+                      ("https://", "http://")
+                  ):
                       continue
 
-                  if re.search(
-                      r"announc|return|coming|"
-                      r"holiday|available|experience",
-                      context,
-                      re.I
-                  ):
-                      announcement_contexts.append(context)
+                  combined = label + " " + full_url
 
-                  if re.search(
-                      r"book now|reserve now|"
-                      r"book your|reserve your|"
-                      r"purchase tickets|"
-                      r"buy tickets|"
-                      r"make a reservation",
-                      context,
-                      re.I
-                  ):
-                      booking_contexts.append(context)
+                  if breakfast_match(combined):
+                      if booking_match(combined):
+                          booking_links.append(full_url)
 
               return {
                   "url": url,
-                  "announcement": announcement_contexts,
-                  "booking": booking_contexts
+                  "announcements": announcements,
+                  "booking_links": booking_links
               }
 
           if STATE_FILE.exists():
-              try:
-                  state = json.loads(STATE_FILE.read_text())
-              except (ValueError, OSError):
-                  raise RuntimeError(
-                      "Monitoring state is invalid. "
-                      "Fix it before continuing."
-                  )
+              state = json.loads(STATE_FILE.read_text())
           else:
               state = {}
 
           if not isinstance(state, dict):
-              raise RuntimeError("Invalid monitoring state.")
+              raise RuntimeError("Invalid state file.")
 
-          state.setdefault("announcement_hashes", [])
-          state.setdefault("booking_hashes", [])
+          initialized = state.get(
+              "grinch_v3_initialized", False
+          )
 
-          results = []
+          seen_announcements = set(
+              state.get("grinch_v3_announcements", [])
+          )
 
-          for url in URLS:
-              try:
-                  result = check_page(url)
-                  results.append(result)
-                  print("Checked:", url)
-                  print(
-                      "Announcement matches:",
-                      len(result["announcement"])
-                  )
-                  print(
-                      "Booking matches:",
-                      len(result["booking"])
-                  )
-              except Exception as error:
-                  print("ERROR checking:", url, error)
-
-          if not results:
-              raise RuntimeError("All Universal pages failed.")
-
-          def fingerprint(url, context):
-              normalized = re.sub(
-                  r"\s+", " ", context.lower()
-              ).strip()
-
-              return hashlib.sha256(
-                  (url + "|" + normalized).encode()
-              ).hexdigest()
-
-          first_run = (
-              "announcement_hashes" not in
-              json.loads(STATE_FILE.read_text())
-              if STATE_FILE.exists()
-              else True
+          seen_links = set(
+              state.get("grinch_v3_booking_links", [])
           )
 
           new_announcements = []
-          new_booking_signals = []
+          new_links = []
+          successful = 0
 
-          for result in results:
-              for context in result["announcement"]:
-                  key = fingerprint(result["url"], context)
+          for url in SOURCES:
+              try:
+                  result = inspect_page(url)
+                  successful += 1
 
-                  if key not in state["announcement_hashes"]:
-                      if not first_run:
-                          new_announcements.append(
-                              result["url"]
-                          )
-                      state["announcement_hashes"].append(key)
+                  print("Checked:", url)
+                  print(
+                      "Announcement matches:",
+                      len(result["announcements"])
+                  )
+                  print(
+                      "Booking links:",
+                      len(result["booking_links"])
+                  )
 
-              for context in result["booking"]:
-                  key = fingerprint(result["url"], context)
+                  for announcement in result["announcements"]:
+                      key = fingerprint(
+                          url + "|" + announcement.lower()
+                      )
 
-                  if key not in state["booking_hashes"]:
-                      if not first_run:
-                          new_booking_signals.append(
-                              result["url"]
-                          )
-                      state["booking_hashes"].append(key)
+                      if key not in seen_announcements:
+                          seen_announcements.add(key)
+
+                          if initialized:
+                              new_announcements.append(url)
+
+                  for link in result["booking_links"]:
+                      key = fingerprint(link)
+
+                      if key not in seen_links:
+                          seen_links.add(key)
+
+                          if initialized:
+                              new_links.append(link)
+
+              except Exception as error:
+                  print("ERROR:", url, error)
+
+          if successful == 0:
+              raise RuntimeError(
+                  "All Universal checks failed."
+              )
 
           if new_announcements:
               notify(
-                  "GRINCH BREAKFAST 2026 UPDATE!",
-                  "New Grinch Breakfast 2026 wording "
-                  "was detected on Universal's website. "
-                  "Review the official information:\n"
-                  + "\n".join(sorted(set(new_announcements)))
+                  "GRINCH BREAKFAST UPDATE!",
+                  "New Grinch Breakfast information "
+                  "was detected. Review Universal:\n" +
+                  "\n".join(sorted(set(new_announcements)))
               )
 
-          if new_booking_signals:
+          if new_links:
               notify(
-                  "GRINCH BREAKFAST BOOKING SIGNAL!",
-                  "New booking-related wording was "
-                  "detected near Grinch Breakfast 2026. "
-                  "This does not confirm availability. "
-                  "Check Universal immediately:\n"
-                  + "\n".join(sorted(set(new_booking_signals))),
+                  "GRINCH BREAKFAST BOOKING LINK!",
+                  "A new booking-related link "
+                  "associated with Grinch Breakfast "
+                  "was detected. Availability is "
+                  "NOT yet confirmed:\n" +
+                  "\n".join(sorted(set(new_links))),
                   "urgent"
               )
+
+          state["grinch_v3_initialized"] = True
+
+          state["grinch_v3_announcements"] = sorted(
+              seen_announcements
+          )
+
+          state["grinch_v3_booking_links"] = sorted(
+              seen_links
+          )
+
+          state["grinch_v3_last_check"] = (
+              datetime.now(timezone.utc).isoformat()
+          )
 
           STATE_FILE.write_text(
               json.dumps(state, indent=2)
           )
 
           print("Monitoring complete.")
+          print("Successful sources:", successful)
+          print("New announcements:", len(new_announcements))
+          print("New booking links:", len(new_links))
           PY
 
       - name: Save monitoring state
